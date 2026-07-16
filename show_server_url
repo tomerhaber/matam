@@ -1,0 +1,45 @@
+@echo off
+REM ===================================================================
+REM  Prints the URLs a client should use to reach this server.
+REM  No hardcoded names - discovers hostname + IPv4 addresses on the fly.
+REM
+REM  Args:  quiet  (skip banner and pause; called from install_server.cmd)
+REM ===================================================================
+setlocal
+
+set "QUIET=%~1"
+
+for /f "usebackq delims=" %%H in (`powershell -NoProfile -Command "$env:COMPUTERNAME.ToLower()"`) do set "HOSTN=%%H"
+
+set "TMP_PS=%TEMP%\_matam_get_ips.ps1"
+> "%TMP_PS%" echo Get-NetIPAddress -AddressFamily IPv4 ^| Where-Object { $_.IPAddress -notmatch '^^(127^|169\.254)' -and $_.PrefixOrigin -ne 'WellKnown' -and $_.AddressState -eq 'Preferred' } ^| Select-Object -ExpandProperty IPAddress
+
+if /I "%QUIET%"=="quiet" goto :print_urls_only
+
+echo.
+echo ==========================================================
+echo  MATAM Server URLs - share these with client machines
+echo ==========================================================
+
+:print_urls_only
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -File "%TMP_PS%"`) do (
+    echo    http://%%I:8090/
+)
+echo    http://%HOSTN%:8090/     - short hostname
+
+if /I "%QUIET%"=="quiet" goto :cleanup
+
+echo.
+echo Admin console - use ONLY on the server PC itself:
+echo    http://127.0.0.1:8090/_/
+echo.
+echo Health check URL from any client browser:
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -File "%TMP_PS%"`) do (
+    echo    http://%%I:8090/api/health
+)
+echo.
+pause
+
+:cleanup
+del "%TMP_PS%" 2>nul
+endlocal
