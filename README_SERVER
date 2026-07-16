@@ -1,0 +1,143 @@
+# MATAM Car System — Server installation guide
+
+You've been given a folder called `matam_server`. It contains everything
+needed to run the MATAM Car System backend on **any Windows PC**. Nothing
+Intel-specific, no external dependencies, no internet access required
+after the initial folder copy.
+
+---
+
+## What you get
+
+```
+matam_server/
+├── pocketbase.exe            The backend server itself
+├── pb_public/                The HTML web app (served by pocketbase.exe)
+│   └── index.html
+├── pb_data/                  Database + logs (auto-populated on first run)
+├── collections_schema.json   The DB schema used on first setup
+├── deploy_config.env         Edit BEFORE first install to change defaults
+├── install_server.cmd        <-- RUN THIS ONCE to set everything up
+├── setup_schema.ps1          Called by install_server.cmd (no need to run manually)
+├── start_pocketbase.cmd      Manual start (installer already auto-registers this)
+├── enable_autostart.cmd      Registers Windows auto-start (installer runs this)
+├── disable_autostart.cmd     Un-registers auto-start
+├── enable_firewall.cmd       Adds Windows Firewall inbound rule (run as admin)
+├── disable_firewall.cmd      Removes the firewall rule (run as admin)
+├── show_server_url.cmd       Prints the URLs to share with clients
+├── change_admin_password.cmd Interactive password change for the admin UI
+└── README_SERVER.md          You are reading this
+```
+
+## Prerequisites
+
+- Windows 10 or later
+- ~50 MB free disk space
+- PowerShell 5+ (built into every modern Windows)
+- **No Python, no Node.js, no Docker, no Java** — nothing else to install
+
+## First-time setup — 3 steps
+
+### 1. (Optional) Edit `deploy_config.env`
+
+Change `ADMIN_PASSWORD` to something private if you don't want the default.
+Everything else is auto-detected.
+
+### 2. Double-click `install_server.cmd`
+
+It will ask "Create the initial admin manager account?" — say **Y** in
+almost all cases (say **N** only if you want to bootstrap users purely
+via the PocketBase admin UI).
+
+The installer takes ~10 seconds and does everything:
+- stops any old PocketBase
+- creates the PocketBase superuser (for the admin console)
+- starts PocketBase in the background
+- applies the DB schema (`vehicles`, `archive`, `leads`, `users`)
+- creates **one** manager account (`admin@matam.local`) that you use to
+  log into the MATAM app itself. From there, the manager creates real
+  employee accounts through the app's built-in User Management section.
+- registers Windows auto-start so PocketBase comes back after every reboot
+- prints the URLs to share with clients
+
+The **same password** is used for both accounts (superuser and manager),
+so you only need to remember one. Set it in `deploy_config.env`
+(default is `matam2026`).
+
+### 3. Right-click `enable_firewall.cmd` → **Run as administrator**
+
+This is a one-time step. Without it, other PCs on the same network can't
+reach the server. You need admin rights just for this one command.
+
+That's the whole install. The server is now running and will keep running
+across reboots.
+
+## Sharing the URL with clients
+
+Run `show_server_url.cmd` at any time. It prints the URLs like:
+
+```
+http://192.168.1.42:8090/       <-- give this to LAN clients
+http://myserver:8090/           <-- short hostname, works on some LANs
+```
+
+Give any one of those URLs to your client machines. They just paste it in
+Chrome / Edge / Firefox. There is nothing to install on the client side
+(see `client/README_CLIENT.md` for optional desktop shortcut).
+
+## Day-to-day management
+
+| I want to... | Do this |
+|---|---|
+| **Add a new employee** | Log into the MATAM app as a manager → **Settings → User Management → Add User**. This is the primary flow. |
+| Reset an employee's password | Same place — click the key icon next to the user → set a new password |
+| Change someone's role (manager ↔ agent) | Same place — pick a new role in the user row |
+| See who's using it, watch logs, low-level DB inspection | Open http://127.0.0.1:8090/_/ on the server PC (advanced) |
+| Change your OWN admin password | Log into the app, **Settings → User Management → Reset my password**, OR double-click `change_admin_password.cmd` |
+| Manual backup | Zip the entire `pb_data` folder while server is running (SQLite WAL is safe) |
+| Restore | Stop PocketBase, replace `pb_data` folder, start again |
+| Move server to another PC | Zip the whole folder, unzip on new PC, run `install_server.cmd` |
+| Temporarily stop the server | `taskkill /IM pocketbase.exe /F` |
+| Un-register auto-start | Double-click `disable_autostart.cmd` |
+| Uninstall completely | Kill pocketbase.exe, run `disable_autostart.cmd`, run `disable_firewall.cmd`, delete the folder |
+
+## Nothing is hardcoded
+
+- **Server hostname / IP**: never hardcoded anywhere. Discovered at runtime.
+- **Admin email/password**: read from `deploy_config.env` (or defaults if the file is missing).
+- **Bind address**: read from `deploy_config.env`, defaults to `0.0.0.0:8090`
+  (any interface, port 8090).
+- **Client URL**: clients open the server URL via a bookmark or a shortcut
+  they create locally with `install_client_shortcut.cmd URL`. If you move
+  the server, clients just update their bookmark.
+
+## Troubleshooting
+
+**"pocketbase.exe not found"** — check the folder you extracted to;
+`pocketbase.exe` must sit next to `install_server.cmd`.
+
+**"superuser upsert failed"** — usually means PocketBase is still holding
+the DB. Kill it manually: `taskkill /IM pocketbase.exe /F` then re-run.
+
+**"PocketBase did not become ready within 30 seconds"** — port 8090 may
+already be in use. Change `BIND=0.0.0.0:8091` in `deploy_config.env` and
+re-run the installer.
+
+**Client can hit `/api/health` but the app pages are blank** — probably
+missing `pb_public\index.html`. Copy the app HTML into `pb_public\` and
+refresh the browser.
+
+**Client on another PC can't reach the server at all** —
+- Both PCs on same LAN / VPN?
+- `enable_firewall.cmd` was run as admin?
+- Try the IP form (`http://192.168.1.42:8090/`) instead of hostname
+- On the server PC, run `show_server_url.cmd` to confirm the current URL
+
+## Security notes for production
+
+- Change the default admin password (`deploy_config.env` or `change_admin_password.cmd`).
+- Change or delete the demo user accounts through the admin UI.
+- Consider putting the server behind HTTPS if you'll be exposing it beyond
+  a trusted LAN. PocketBase supports Let's Encrypt automatic HTTPS with
+  `--https 0.0.0.0:443` if the machine has a public DNS name; for LAN-only
+  deployments plain HTTP is normally fine.
