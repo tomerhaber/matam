@@ -1,0 +1,187 @@
+#requires -version 5.0
+<#
+    setup_schema.ps1
+    ----------------
+    Idempotent PocketBase schema bootstrap. No external dependencies (uses
+    built-in Invoke-RestMethod). Safe to re-run any time.
+
+    Reads:
+      collections_schema.json  -  the collection definitions
+
+    Params:
+      -PbUrl        default http://127.0.0.1:8090   (change to bind IP if remote)
+      -AdminEmail   default admin@matam.local
+      -AdminPass    default (must be provided if changed from default in config)
+      -CreateDemos  switch: if set, creates manager/agent demo users
+
+    Exit codes:
+      0  success
+      1  cannot reach PocketBase
+      2  admin auth failed
+      3  schema import failed
+#>
+param(
+    [string]$PbUrl          = 'http://127.0.0.1:8090',
+    [string]$AdminEmail     = 'admin@matam.local',
+    [string]$AdminPass      = 'matam2026',
+    [string]$SchemaFile     = "$PSScriptRoot\collections_schema.json",
+    [string]$InitialUsersFile = "$PSScriptRoot\initial_users.json",
+    [switch]$CreateInitialUser
+)
+
+$ErrorActionPreference = 'Stop'
+
+# Force outbound HTTP request bodies to be UTF-8 encoded. Without this,
+# PowerShell 5 uses the system's ANSI code page, corrupting Hebrew and any
+# other non-ASCII characters into '?' before they ever reach PocketBase.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+function Fail($code, $msg) { Write-Host "ERROR: $msg" -ForegroundColor Red; exit $code }
+function Log($msg)         { Write-Host $msg -ForegroundColor Cyan }
+function Ok($msg)          { Write-Host "  [OK] $msg" -ForegroundColor Green }
+function Warn($msg)        { Write-Host "  [!!] $msg" -ForegroundColor Yellow }
+
+# Wrapper around Invoke-RestMethod that ALWAYS sends the body as UTF-8 bytes
+# and always parses the response as UTF-8 too. Necessary for Hebrew field values.
+function PbRest {
+    param(
+        [Parameter(Mandatory)] [string] $Method,
+        [Parameter(Mandatory)] [string] $Uri,
+        [Parameter()] [object] $Body,
+        [Parameter()] [hashtable] $Headers = @{}
+    )
+    $extraHeaders = @{}
+    foreach ($k in $Headers.Keys) { $extraHeaders[$k] = $Headers[$k] }
+    $extraHeaders['Accept'] = 'application/json; charset=utf-8'
+
+    if ($Body -ne $null) {
+        if ($Body -is [string]) { $jsonStr = $Body }
+        else                    { $jsonStr = ($Body | ConvertTo-Json -Depth 20 -Compress:$false) }
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($jsonStr)
+        return Invoke-RestMethod -Method $Method -Uri $Uri `
+            -Headers $extraHeaders -ContentType 'application/json; charset=utf-8' -Body $bytes
+    } else {
+        return Invoke-RestMethod -Method $Method -Uri $Uri -Headers $extraHeaders
+    }
+}
+
+# 1. Reachability -------------------------------------------------------
+Log "Checking PocketBase at $PbUrl ..."
+try {
+    $h = PbRest -Method Get -Uri "$PbUrl/api/health"
+    Ok "server up: $($h.message)"
+} catch {
+    Fail 1 "Cannot reach $PbUrl - is PocketBase running? ($_)"
+}
+
+# 2. Admin authentication -----------------------------------------------
+Log "Authenticating as superuser $AdminEmail ..."
+try {
+    $auth = PbRest -Method Post -Uri "$PbUrl/api/collections/_superusers/auth-with-password" `
+        -Body @{ identity = $AdminEmail; password = $AdminPass }
+    $token = $auth.token
+    Ok "superuser token acquired"
+} catch {
+    Fail 2 "Admin login failed. Did the superuser get created? (Run:  pocketbase.exe superuser upsert $AdminEmail <password>). Error: $_"
+}
+
+$headers = @{ Authorization = $token }
+
+# 3. Import / upsert each collection ------------------------------------
+if (-not (Test-Path $SchemaFile)) { Fail 3 "Schema file not found: $SchemaFile" }
+Log "Loading schema from $SchemaFile ..."
+$schema = Get-Content -Raw -LiteralPath $SchemaFile | ConvertFrom-Json
+Ok "$($schema.Count) collections to install"
+
+foreach ($coll in $schema) {
+    $name = $coll.name
+    Log "Collection: $name"
+
+    # Fetch existing (if any)
+    $existing = $null
+    try {
+        $existing = PbRest -Method Get -Uri "$PbUrl/api/collections/$name" -Headers $headers
+    } catch {
+        # 404 - doesn't exist yet
+    }
+
+    # Strip 'id' so PocketBase auto-assigns a fresh one on create
+    $body = $coll | Select-Object * -ExcludeProperty id
+
+    if ($existing) {
+        try {
+            $null = PbRest -Method Patch -Uri "$PbUrl/api/collections/$($existing.id)" -Headers $headers -Body $body
+            Ok "updated (had $($existing.fields.Count) fields -> now $($coll.fields.Count))"
+        } catch {
+            Warn "PATCH failed for $name : $_ - continuing"
+        }
+    } else {
+        try {
+            $null = PbRest -Method Post -Uri "$PbUrl/api/collections" -Headers $headers -Body $body
+            Ok "created with $($coll.fields.Count) fields, $($coll.indexes.Count) indexes"
+        } catch {
+            Fail 3 "Create failed for $name : $_"
+        }
+    }
+}
+
+# 4. Optional: create initial manager account ---------------------------
+if ($CreateInitialUser) {
+    if (-not (Test-Path $InitialUsersFile)) {
+        Warn "initial_users.json not found - skipping"
+    } else {
+        Log "Bootstrapping initial user account(s) from initial_users.json ..."
+        # Read as raw bytes with explicit UTF-8 (survives files without BOM)
+        $rawBytes = [System.IO.File]::ReadAllBytes($InitialUsersFile)
+        $jsonText = [System.Text.Encoding]::UTF8.GetString($rawBytes)
+        $users = $jsonText | ConvertFrom-Json
+        Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue
+        foreach ($u in $users) {
+            $filter = [System.Web.HttpUtility]::UrlEncode(('email="{0}"' -f $u.email))
+            try {
+                $found = PbRest -Method Get -Uri "$PbUrl/api/collections/users/records?filter=$filter" -Headers $headers
+            } catch {
+                $found = @{ items = @() }
+            }
+            if ($found.items.Count -gt 0) {
+                # Update role + reset password to the configured value
+                $uid = $found.items[0].id
+                $updateBody = @{
+                    password        = $u.password
+                    passwordConfirm = $u.password
+                    role            = $u.role
+                    displayName     = $u.displayName
+                }
+                try {
+                    $null = PbRest -Method Patch -Uri "$PbUrl/api/collections/users/records/$uid" -Headers $headers -Body $updateBody
+                    Ok "user $($u.email) existed - password and role refreshed"
+                } catch {
+                    Warn "PATCH user $($u.email) failed: $_"
+                }
+                continue
+            }
+            $body = @{
+                email           = $u.email
+                emailVisibility = $true
+                password        = $u.password
+                passwordConfirm = $u.password
+                role            = $u.role
+                displayName     = $u.displayName
+            }
+            try {
+                $null = PbRest -Method Post -Uri "$PbUrl/api/collections/users/records" -Headers $headers -Body $body
+                Ok "created initial user $($u.email) [$($u.role)] as $($u.displayName)"
+            } catch {
+                Warn "create user $($u.email) failed: $_"
+            }
+        }
+    }
+}
+
+Write-Host ""
+Write-Host "=====================================================" -ForegroundColor Green
+Write-Host " Schema setup complete." -ForegroundColor Green
+Write-Host " Admin UI:  $PbUrl/_/" -ForegroundColor Green
+Write-Host " App URL :  $PbUrl/  (share this with clients)" -ForegroundColor Green
+Write-Host "=====================================================" -ForegroundColor Green
+exit 0
