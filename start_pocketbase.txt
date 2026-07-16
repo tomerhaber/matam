@@ -1,0 +1,33 @@
+@echo off
+REM ===================================================================
+REM  Portable PocketBase launcher.
+REM  - Reads optional deploy_config.env for BIND override
+REM  - Serves data from .\pb_data and static app from .\pb_public
+REM  - No hardcoded hostnames anywhere
+REM ===================================================================
+setlocal
+cd /d "%~dp0"
+
+set "BIND=0.0.0.0:8090"
+if exist "deploy_config.env" (
+    for /f "usebackq tokens=1,* delims==" %%A in ("deploy_config.env") do (
+        if /I "%%A"=="BIND" set "BIND=%%B"
+    )
+)
+
+if not exist "pocketbase.exe" (
+    echo [ERROR] pocketbase.exe not found in %CD%
+    pause
+    exit /b 1
+)
+
+REM If already running, don't start a second copy
+tasklist /FI "IMAGENAME eq pocketbase.exe" 2>NUL | find /I "pocketbase.exe" >NUL
+if not errorlevel 1 (
+    echo PocketBase is already running. Not starting a second instance.
+    exit /b 0
+)
+
+echo Starting PocketBase on %BIND% ...
+pocketbase.exe serve --http "%BIND%" --dir "pb_data" --publicDir "pb_public"
+endlocal
