@@ -1,0 +1,7 @@
+Read C:\matam_server\AGENT_CONTEXT.md first — it's a full architectural brief written specifically for AI agents. Cookbook for adding fields / tabs / roles is in section 6.
+Main file to edit: C:\matam_server\pb_public\index.html (4600 lines, all frontend in one file, no build step — just refresh browser).
+Data model reference: C:\matam_server\deploy\collections_schema.json
+Dev loop: edit HTML → hard-refresh browser → done.
+Tech stack: vanilla JS + Tailwind (CDN) + PocketBase (Go binary + SQLite). No npm, no build. Hebrew RTL UI.
+
+Ping me if the install script errors out or the agent gets confused about the codebase.
